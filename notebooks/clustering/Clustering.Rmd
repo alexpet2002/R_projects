@@ -1,0 +1,413 @@
+---
+title: "Clustering on Customer Hotel Reservation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,      
+  message = FALSE,   
+  warning = FALSE    
+)
+```
+
+
+```{r imports}
+# libraries
+# install.packages("readxl")
+# install.packages("fossil")
+# install.packages("glmnet")
+library(readxl)
+library(glmnet)
+library(cluster)
+library(dplyr)
+library(fossil)
+library(cluster)
+library(purrr)
+library(knitr)
+```
+
+The objective of this report is to observe behaviour of hotel customers and compare two clustering methods on this dataset( k-medoids/ hierarchical). The dataset refers to a random sample of room reservations at a hotel and whether or not the reservation was ultimately cancelled. 
+
+### Dataset Variables
+
+| Variable | Description |
+|---|---|
+| `Booking_ID` | Unique identifier for each booking |
+| `number.of.adults` | Number of adults included in the booking |
+| `number.of.children` | Number of children included in the booking |
+| `number.of.weekend.nights` | Number of weekend nights included in the booking |
+| `number.of.week.nights` | Number of week nights included in the booking |
+| `type.of.meal` | Type of meal included in the booking |
+| `car.parking.space` | Indicates whether a car parking space was requested or included in the booking |
+| `room.type` | Type of room booked |
+| `lead.time` | Number of days between the booking date and the arrival date |
+| `market.segment.type` | Type of market segment associated with the booking |
+| `repeated` | Indicates whether the booking is a repeat booking |
+| `P.C` | Number of previous bookings canceled by the customer prior to the current booking |
+| `P.not.C` | Number of previous bookings not canceled by the customer prior to the current booking |
+| `average.price` | Average price associated with the booking |
+| `special.requests` | Number of special requests made by the guest |
+| `date.of.reservation` | Date of the reservation |
+| `booking.status` | Status of the booking (canceled or not canceled) |
+
+```{r import data, echo=FALSE,results='hide', comment = NA}
+############ Importing data ############
+
+original_data <- read_excel("data/project cluster.xlsx")
+# drop Nan values
+data <- na.omit(original_data)
+
+```
+#### Dataset : First 10 observations ####
+
+```{r display data, echo=FALSE,comment = NA}
+
+kable(
+  head(data, 10),
+  format = "pipe",
+)
+
+```
+
+
+### 1. Variable Selection ###
+
+```{r correl table, echo=FALSE, comment = NA}
+############ Correlation table ############
+
+numeric_vars <- data[ , purrr::map_lgl(data, ~ is.numeric(.x) && length(unique(.x)) > 2)]
+
+# numeric_vars
+
+correlation_matrix = cor(numeric_vars)
+
+knitr::kable(
+  round(correlation_matrix, 2),
+  format = "pipe",
+  caption = "Pearson correlation matrix for numeric variables"
+)
+```
+
+For variable selection, we first examine the correlations among all numerical variables. If two variables show a high correlation with each other, this indicates that they could potentially be combined.
+
+No such variables were found. The correlation matrix displays only linear relationships and assumes homoscedasticity; therefore, it may not always be reliable.
+
+Furthermore, correlation does not imply causation, since a strong correlation does not mean that one variable causes a change in the other.
+
+Data preparation: Since dataset is mixed, potentially gower distance will be used and string variables should not be transformed to binary. gower computes difference between variables for categorical data.
+
+
+```{r checking values, echo=FALSE, comment = NA}
+
+# check categories
+unique(data$type.of.meal)
+unique(data$room.type)
+unique(data$market.segment.type)
+unique(data$booking.status)
+```
+
+Since our objective is to cluster bookings based on their characteristics, it is necessary to examine which variables are associated with whether a booking was cancelled or not.
+
+```{r conversion, resuts = 'hide', echo=FALSE, comment = NA}
+# change string to binary for pearson
+data$booking.status <- as.character(data$booking.status)
+data$booking.status <- ifelse(data$booking.status == "Canceled", 1, 0)
+
+```
+
+```{r pearson, echo=FALSE, comment = NA}
+# pearson correlation test
+cor.test(data$P.C, data$booking.status)
+cor.test(data$P.not.C, data$booking.status)
+```
+
+We exclude the P-not-C and P-C variables because, although they have a small correlation with booking cancellation (Pearson correlations of -0.04978258 and -0.06200138) and are highly correlated with each other and statistically significant, they lead to expected behaviour in the clustering. In other words, customers who cancelled in the past are likely to cancel a booking again, whereas the objective is to study customer booking behaviour after the clustering has been performed. The same applies to the repeated variable. Important variables such as average price, the number of adults and children (to distinguish whether the booking concerns a family), the time between booking and arrival, the number of special requests, market segment, and room type will be retained. The number of weekend nights and number of week nights variables are also combined in order to examine the total duration of the booking.
+
+The booking ID variable is clearly not selected. The date of reservation variable is also excluded because it would need to be split into three components, and it is not clear which component is important. For example, a day of the month has little meaning without simultaneously knowing either the year or the month.
+
+### 2.K-Medoids Clustering (PAM) ###
+
+After a brief analysis, the useful variables include both categorical/binary and numerical variables; therefore, clustering for mixed data is performed.
+
+As the first clustering method, the k-means variant k-medoids (PAM) was selected, using Gower distance because it is suitable for mixed data. To select the optimal value of k, values from 2 to 13 are tested, examining the silhouette score at each iteration.
+
+```{r selection, echo=FALSE, comment = NA}
+############ variable selection #################################
+
+# Clustering 1 :kmedoids(PAM) with Gower distance
+# combining week and weekend stays
+data$total.nights <- data$number.of.week.nights + data$number.of.weekend.nights
+
+chosen_vars <- data[, c(
+  "lead.time",
+  "number.of.adults",
+  "number.of.children",
+  "total.nights",
+  "special.requests",
+  "average.price",
+  "market.segment.type",
+  "room.type",
+  "type.of.meal"
+)]
+
+```
+
+
+```{r fix types, echo=FALSE, comment = NA}
+
+# fix column types
+num_cols <- c("lead.time", "number.of.adults", "number.of.children",
+              "total.nights", "special.requests", "average.price")
+chosen_vars[num_cols] <- lapply(chosen_vars[num_cols], as.numeric)
+
+cat_cols <- c("market.segment.type", "room.type", "type.of.meal")
+chosen_vars[cat_cols] <- lapply(chosen_vars[cat_cols], factor)
+
+```
+
+
+```{r slihouette matrix, echo=FALSE, comment = NA}
+
+############ pam #################################
+
+gower_distance <- daisy(chosen_vars, metric = "gower")
+compute_silh_matrix <- function(model,dist)
+{
+  # computing silhouette score
+  silhouette_score <- silhouette(model$clustering, dist)
+  return(silhouette_score)
+}
+
+compute_pam_silhouette <- function(chosen_vars, k_min, k_max) {
+  silh_scores <- numeric()
+  gower_distance <- daisy(chosen_vars, metric = "gower")
+  par(mfrow = c(2, 3))
+  for (k in k_min: k_max) {
+    pam_fit <- pam(gower_distance, k = k, diss = TRUE)
+    clusplot(
+      pam_fit,
+      main = paste("PAM Clustering - k =", k)
+    )
+    silhouette_matrix <- compute_silh_matrix(pam_fit, gower_distance)
+    silh_scores<- c(silh_scores, mean(silhouette_matrix[, 3]))
+  }
+  return(silh_scores)
+}
+  
+silh_scores<- compute_pam_silhouette(chosen_vars, 2, 13)
+
+```
+
+```{r slihouette scores1, echo=FALSE, fig.cap= " Silhouette Scores", comment = NA}
+
+silhouette_table <- data.frame(
+  k = 2:13,
+  Silhouette_Score = silh_scores
+)
+
+knitr::kable(silhouette_table,format = "pipe")
+```
+Overall, the silhouette scores range from 0.36 to 0.50, which is relatively low and indicates that the clusters are not optimal. From k = 7 onward, the score decreases, so the choice of k will be limited to values up to 7. From the results above, the best solutions correspond to 6 and 7 clusters, with scores of 0.4763 and 0.5042 respectively. Therefore, k = 7 was selected for the final model.
+
+```{r final cluster, echo=FALSE, comment = NA}
+# install.packages("cluster")
+# choosing k=7 since it has the best silhouette score
+k<-7
+pam_fit_v2 <- pam(gower_distance, k , diss = TRUE)
+data$cluster <- pam_fit_v2$clustering
+clusplot(pam_fit_v2, main = paste("PAM Clustering - k =", k))
+
+```
+
+Determining which clusters contain highest cancellations rate
+
+
+
+```{r cancellation rate, echo=FALSE, comment = NA}
+
+aggregate(booking.status ~ cluster, data, sum)
+aggregate(booking.status ~ cluster, data, mean)
+
+```
+
+```{r cluster results, echo=FALSE, comment = NA}
+# finding which vars are causing high cancellations
+
+# fixing vars again
+num_vars <- names(chosen_vars)[sapply(chosen_vars, is.numeric)]
+cat_vars <- names(chosen_vars)[sapply(chosen_vars, function(x) is.factor(x) || is.character(x))]
+
+data[num_cols] <- lapply(data[num_cols], as.numeric)
+data[cat_cols] <- lapply(data[cat_cols], factor)
+
+
+cluster_profiles_num <- data %>%
+  group_by(cluster) %>%
+  summarise(
+    cancellation_rate = mean(booking.status, na.rm = TRUE) * 100,
+    across(
+      all_of(num_vars),
+      ~ mean(.x, na.rm = TRUE),
+      .names = "{.col}_mean"
+    ),
+    .groups = "drop"
+  )
+
+cluster_profiles_cat <- data %>%
+  group_by(cluster) %>%
+  summarise(
+    across(
+      all_of(cat_vars),
+      ~ names(which.max(table(.x))),
+      .names = "{.col}_mode"
+    ),
+    .groups = "drop"
+  )
+
+cluster_profiles <- left_join(cluster_profiles_num, cluster_profiles_cat, by = "cluster")
+
+knitr::kable(cluster_profiles, format = "pipe", digits = 2,caption = "Cluster Profiles")
+
+```
+
+The summary table above shows that Cluster 2 has the highest cancellation rate, at around 43%, cluster 6 is not far off, at 40%. CLuster 2 is accompanied by the longest time between booking and arrival (130 days) , which may help explain the cancellations. It also has relatively few special requests (0.22 on average) and is primarily associated with the Offline market segment.
+
+Unlike Cluster 2, in Cluster 6 the average lead time is considerably shorter (68.75 days), but it stands out for having the highest average number of children (1.85), the highest average price (167.42), and almost one special request per booking. It associated with the Online segment.
+
+### 3. Hierarchical Clustering ###
+  
+We proceed with hierarchical clustering using Ward’s agglomerative method because it is also suitable for the data used here.
+
+
+```{r hierarchical, echo=FALSE, comment = NA}
+
+############ hierarchical clustering #################################
+
+hierarchical_clustering <- hclust(as.dist(gower_distance), method = "ward.D2")
+
+plot(hierarchical_clustering, labels = FALSE, hang = -1,sub = "")
+
+# cutting tree 
+# abline(h = 1.7, col = "green")
+fit <- cutree(hierarchical_clustering, h = 2)
+# fit
+data$cluster_2 <- fit
+# table(fit)
+
+# plotting clusters on the tree
+rect.hclust(hierarchical_clustering, k = 7, border = "darkgreen")
+
+
+heights <- c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5)
+
+silhouette_scores <- sapply(heights, function(h) {
+  fit <- cutree(hierarchical_clustering, h = h)
+  k   <- length(unique(fit))
+
+  if (k < 2L) return(NA_real_)
+
+  sil <- silhouette(fit, gower_distance)
+  mean(sil[, "sil_width"])
+})
+```
+
+We select the number of clusters based on the dendrogram above. Tree cutting must be applied using the following criterion: consider the distance at which two groups are joined. If we observe a point at which this distance suddenly
+
+makes a large jump, this may mean that we have begun merging groups that
+
+are already well separated, and therefore the clustering process should have been stopped earlier.
+
+In this case, the four largest jumps occur approximately above the value 2.5 (visually, around 2.7).
+
+For testing, we use the heights (1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5).
+
+```{r silhouette, echo=FALSE, fig.cap= " Silhouette Scores", comment = NA}
+silhouette_table1 <- data.frame(
+  Height = heights,
+  Silhouette_Score = silhouette_scores
+)
+
+knitr::kable(silhouette_table1, format = "pipe")
+```
+A height of 1.5 produces the highest silhouette score (0.5368415), corresponding to 10 clusters. However, this results in several clusters of relatively small size, so the immediately preceding solution is preferred, with a silhouette score of 0.5022764 and 7 clusters. This is also consistent with the PAM result.
+
+```{r hierarchical cohesion, echo=FALSE, comment = NA}
+pam_clusters <- pam_fit_v2$clustering
+h_clusters  <- cutree(hierarchical_clustering, k = 7)
+
+
+cohesion <- function(dist_matrix, clusters) {
+  dmat <- as.matrix(dist_matrix)
+  sapply(split(seq_along(clusters), clusters),
+         function(idx) mean(dmat[idx, idx]))
+}
+
+pam_cohesion <- cohesion(gower_distance, pam_clusters)
+h_cohesion   <- cohesion(gower_distance, h_clusters)
+
+pam_cohesion
+h_cohesion
+```
+
+We observe that, on average, the PAM clusters have lower cohesion values than the hierarchical clusters, indicating that PAM creates tighter, more compact clusters.
+
+```{r hierarchical results, echo=FALSE, comment = NA}
+clusters_h_num <- suppressWarnings(
+  data %>%
+    group_by(cluster_2) %>%
+    summarise(
+      cancellation_rate = mean(booking.status, na.rm = TRUE),
+      across(
+        all_of(num_vars),
+        ~ mean(.x, na.rm = TRUE),
+        .names = "{.col}_mean"
+      ),
+      .groups = "drop"
+    )
+)
+
+clusters_h_cat <- data %>%
+  group_by(cluster_2) %>%
+  summarise(
+    across(
+      all_of(cat_vars),
+      ~ names(which.max(table(.x))),
+      .names = "{.col}_mode"
+    ),
+    .groups = "drop"
+  )
+
+clusters <- left_join(clusters_h_num, clusters_h_cat, by = "cluster_2")
+knitr::kable(clusters, format = "pipe", digits = 2,caption = "Cluster Profiles")
+
+```
+
+### 4.Clustering Methods comparison ###
+
+Finally, the Rand statistic and Jaccard coefficient metrics are used.
+
+```{r clustering comparison, echo=FALSE, comment = NA}
+############ Metrics #################################
+
+# cluster labels
+labels_pam <- pam_fit_v2$clustering
+labels_h   <- cutree(hierarchical_clustering, k = 7)
+
+rand_index <- rand.index(labels_pam, labels_h)
+
+jaccard <- jaccard(labels_pam, labels_h)
+
+adjusted <- adj.rand.index(labels_pam, labels_h)
+
+data.frame(
+  metric = c("Rand Index", "Adjusted Rand Index", "Jaccard Coefficient"),
+  value  = c(rand_index, adjusted, jaccard)
+)
+```
+
+Hierarchical clustering produced a slightly higher silhouette score, indicating better separation between clusters compared with PAM. Overall, however, the silhouette score remained relatively low for both methods.
+
+The similarity between the two clustering methods is extremely high. The Rand (0.969), Adjusted Rand (0.901), and Jaccard (1.0) indices indicate that PAM and hierarchical clustering produce an almost identical allocation across the 7 clusters. Although PAM performs better according to the cohesion and separation criteria, the two methods are highly consistent with each other, confirming the stability of the structure in the data.
+
+Overall, each method performs better according to a different criterion. However, PAM produces more cohesive and clearly separated clusters, while the hierarchical method performs only slightly better in terms of the silhouette score.
