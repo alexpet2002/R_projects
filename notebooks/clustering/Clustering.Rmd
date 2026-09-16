@@ -1,6 +1,6 @@
 ---
 title: "Clustering on Customer Hotel Reservation"
-output: html_document
+output: github_document
 ---
 
 ```{r setup, include=FALSE}
@@ -14,9 +14,6 @@ knitr::opts_chunk$set(
 
 ```{r imports}
 # libraries
-# install.packages("readxl")
-# install.packages("fossil")
-# install.packages("glmnet")
 library(readxl)
 library(glmnet)
 library(cluster)
