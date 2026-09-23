@@ -1,5 +1,5 @@
-# R_projects
-repository of projects in R for data science.
+# R projects
+Repository of projects in R for data science.
 
 **[Hierarchical and Kmedoids Clustering for Hotel Reservation Behaviour](https://github.com/alexpet2002/R_projects/blob/main/notebooks/clustering/Clustering.md)**
 
